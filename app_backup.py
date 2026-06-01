@@ -5,14 +5,21 @@ import ssl
 from types import SimpleNamespace
 from difflib import SequenceMatcher
 from pypdf import PdfReader
-import google.generativeai as genai
+from google import genai
 from datetime import datetime, timedelta
 from flask import Flask, render_template, request, redirect, url_for, flash, send_file, send_from_directory, session, jsonify, abort
 from flask_login import LoginManager, login_user, login_required, logout_user, current_user
 from flask_bcrypt import Bcrypt
+from flask_wtf.csrf import CSRFProtect, generate_csrf
 from werkzeug.utils import secure_filename
+from werkzeug.security import check_password_hash as werk_check_password_hash
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadTimeSignature
-from sqlalchemy import text, or_, and_
+from sqlalchemy import text, or_, and_, func
+# Optional Twilio import for sending SMS OTPs. If not installed, we'll fallback to terminal logging.
+try:
+    from twilio.rest import Client as TwilioClient
+except Exception:
+    TwilioClient = None
 from reportlab.lib.pagesizes import letter, A4
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -80,20 +87,20 @@ load_dotenv_file(os.path.join(os.path.dirname(__file__), '.env'))
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your_super_secret_key_change_in_production')
-#app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///library.db'
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'postgresql://library_user:Abifang@localhost:5432/library_db')
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///library.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['UPLOAD_FOLDER'] = os.path.join(app.root_path, 'uploads')
 app.config['GEMINI_API_KEY'] = os.environ.get('GEMINI_API_KEY')
 app.config['PREFERRED_URL_SCHEME'] = 'http'
+app.config['TEMPLATES_AUTO_RELOAD'] = True
+app.jinja_env.auto_reload = True
 
 # Configure Gemini client only when a real key is present.
 def is_gemini_api_configured():
     key = app.config.get('GEMINI_API_KEY', '')
     return bool(key and key.strip() and key not in ['AIza...', 'your-real-gemini-api-key'])
 
-if is_gemini_api_configured():
-    genai.configure(api_key=app.config['GEMINI_API_KEY'])
+client = genai.Client(api_key=app.config['GEMINI_API_KEY']) if is_gemini_api_configured() else None
 
 # For password reset tokens
 s = URLSafeTimedSerializer(app.config['SECRET_KEY'])
@@ -102,8 +109,39 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 db.init_app(app)
 bcrypt = Bcrypt(app)
+# Enable CSRF protection
+csrf = CSRFProtect()
+csrf.init_app(app)
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
+
+# Secure cookie settings
+# Use secure cookies only in production/HTTPS. When developing locally over HTTP,
+# browsers will not send cookies marked Secure, which breaks session and CSRF.
+is_production = os.environ.get('FLASK_ENV', '').lower() == 'production' or os.environ.get('ENABLE_SECURE_COOKIES') == '1'
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SECURE'] = True if is_production else False
+app.config['REMEMBER_COOKIE_SECURE'] = True if is_production else False
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+
+# Optional security headers via Flask-Talisman
+try:
+    from flask_talisman import Talisman
+    csp = {
+        'default-src': "'self'",
+        'script-src': ["'self'", 'https://cdn.jsdelivr.net'],
+        'style-src': ["'self'", 'https://cdn.jsdelivr.net'],
+        'img-src': ["'self'", 'data:']
+    }
+    Talisman(app, content_security_policy=csp)
+except Exception:
+    # Flask-Talisman not installed — continue without enforcing headers
+    pass
+
+# expose csrf token generator to templates
+@app.context_processor
+def inject_csrf_token():
+    return {'csrf_token': generate_csrf}
 
 PASSWORD_RULES = {
     'uppercase': re.compile(r'[A-Z]'),
@@ -114,6 +152,48 @@ def is_valid_password(password):
     if not password or len(password) < 8:
         return False
     return bool(PASSWORD_RULES['uppercase'].search(password) and PASSWORD_RULES['special'].search(password))
+
+def verify_password(stored_hash, password):
+    """Verify a password against multiple possible hash formats.
+    Try bcrypt first, then fall back to Werkzeug's check (for pbkdf2:sha256 hashes).
+    """
+    if not stored_hash or not password:
+        return False
+    try:
+        # bcrypt expects the stored hash to be the bcrypt string
+        if bcrypt.check_password_hash(stored_hash, password):
+            return True
+    except (ValueError, TypeError):
+        # Invalid salt or incompatible hash format for bcrypt
+        pass
+    try:
+        # Fall back to werkzeug checks (e.g., pbkdf2:sha256)
+        return werk_check_password_hash(stored_hash, password)
+    except Exception:
+        return False
+
+
+def send_sms(phone_number, message):
+    """Send an SMS using Twilio if configured; otherwise log to terminal.
+
+    Uses env vars: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER
+    """
+    sid = os.environ.get('TWILIO_ACCOUNT_SID') or app.config.get('TWILIO_ACCOUNT_SID')
+    token = os.environ.get('TWILIO_AUTH_TOKEN') or app.config.get('TWILIO_AUTH_TOKEN')
+    from_number = os.environ.get('TWILIO_FROM_NUMBER') or app.config.get('TWILIO_FROM_NUMBER')
+
+    if TwilioClient and sid and token and from_number:
+        try:
+            client = TwilioClient(sid, token)
+            client.messages.create(body=message, from_=from_number, to=phone_number)
+            return True
+        except Exception as e:
+            print(f"Twilio send error: {e}")
+            # fallthrough to terminal logging
+
+    # Fallback behavior: print to terminal (existing behavior)
+    print(f"\n{'='*50}\nSMS SENT TO {phone_number}: {message}\n{'='*50}\n")
+    return False
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -137,15 +217,16 @@ def normalize_reading_status(status):
 
 def book_access_allowed(book, user):
     if user.is_admin:
-        return book.user_id == user.id or book.is_global
+        return True
     if book.user_id == user.id:
         return True
     if not book.is_global:
         return False
 
     profile = StudentProfile.query.filter_by(user_id=user.id).first()
-    student_class = profile.student_class if profile else None
-    return book.target_class == 'All' or (student_class and book.target_class == student_class)
+    student_class = profile.student_class.strip().lower() if profile and profile.student_class else None
+    target_class = (book.target_class or 'All').strip().lower()
+    return target_class == 'all' or (student_class and target_class == student_class)
 
 def get_or_create_book_progress(user_id, book_id):
     progress = BookProgress.query.filter_by(user_id=user_id, book_id=book_id).first()
@@ -250,10 +331,20 @@ def dashboard():
     if current_user.is_admin:
         query = Book.query.filter(or_(Book.user_id == current_user.id, Book.is_global == True))
     else:
+        if student_class:
+            student_class_lower = student_class.strip().lower()
+            class_match = or_(
+                Book.target_class == 'All',
+                Book.target_class == None,
+                func.lower(Book.target_class) == student_class_lower
+            )
+        else:
+            class_match = or_(Book.target_class == 'All', Book.target_class == None)
+
         query = Book.query.filter(
             or_(
-                Book.user_id == current_user.id, 
-                and_(Book.is_global == True, or_(Book.target_class == 'All', Book.target_class == student_class))
+                Book.user_id == current_user.id,
+                and_(Book.is_global == True, class_match)
             )
         )
 
@@ -280,8 +371,14 @@ def dashboard():
         books_by_category = dict(sorted(books_by_category.items()))
     category_colors = {category: CATEGORY_PALETTE[i % len(CATEGORY_PALETTE)] for i, category in enumerate(sorted(books_by_category.keys()))}
 
-    notifications = Notification.query.filter(or_(Notification.user_id == current_user.id, Notification.user_id == None), Notification.is_read == False).order_by(Notification.created_at.desc()).limit(5).all()
-    unread_count = Notification.query.filter(or_(Notification.user_id == current_user.id, Notification.user_id == None), Notification.is_read == False).count()
+    notifications = Notification.query.filter(
+        or_(Notification.user_id == current_user.id, Notification.user_id == None),
+        Notification.is_read == False
+    ).order_by(Notification.created_at.desc()).limit(5).all()
+    unread_count = Notification.query.filter(
+        or_(Notification.user_id == current_user.id, Notification.user_id == None),
+        Notification.is_read == False
+    ).count()
     no_admin_exists = User.query.filter_by(is_admin=True).first() is None
     
     unread_messages = Message.query.filter(Message.recipient_id == current_user.id, Message.is_read == False).count()
@@ -289,11 +386,27 @@ def dashboard():
     active_evaluations_count = 0
     active_assignments_count = 0
     if student_class:
-        active_evaluations_count = Evaluation.query.filter(Evaluation.is_active == True, or_(Evaluation.target_class == 'All', Evaluation.target_class == student_class)).count()
-        active_assignments_count = Assignment.query.filter(Assignment.is_active == True, or_(Assignment.target_class == 'All', Assignment.target_class == student_class)).count()
+        active_evaluations_count = Evaluation.query.filter(
+            Evaluation.is_active == True,
+            or_(Evaluation.target_class == 'All', Evaluation.target_class == student_class),
+            ~Evaluation.attempts.any(EvaluationAttempt.user_id == current_user.id)
+        ).count()
+        active_assignments_count = Assignment.query.filter(
+            Assignment.is_active == True,
+            or_(Assignment.target_class == 'All', Assignment.target_class == student_class),
+            ~Assignment.submissions.any(AssignmentSubmission.user_id == current_user.id)
+        ).count()
     elif not current_user.is_admin:
-        active_evaluations_count = Evaluation.query.filter(Evaluation.is_active == True, Evaluation.target_class == 'All').count()
-        active_assignments_count = Assignment.query.filter(Assignment.is_active == True, Assignment.target_class == 'All').count()
+        active_evaluations_count = Evaluation.query.filter(
+            Evaluation.is_active == True,
+            Evaluation.target_class == 'All',
+            ~Evaluation.attempts.any(EvaluationAttempt.user_id == current_user.id)
+        ).count()
+        active_assignments_count = Assignment.query.filter(
+            Assignment.is_active == True,
+            Assignment.target_class == 'All',
+            ~Assignment.submissions.any(AssignmentSubmission.user_id == current_user.id)
+        ).count()
 
     # Reading progress stats
     reading_stats = {
@@ -322,11 +435,17 @@ def dashboard():
         finished_books=finished_books
     )
 
+def mark_notifications_read_for_current_user():
+    Notification.query.filter(
+        or_(Notification.user_id == current_user.id, Notification.user_id == None),
+        Notification.is_read == False
+    ).update({'is_read': True}, synchronize_session=False)
+    db.session.commit()
+
 @app.route('/mark_notifications_read', methods=['POST'])
 @login_required
 def mark_notifications_read():
-    Notification.query.filter(or_(Notification.user_id == current_user.id, Notification.user_id == None), Notification.is_read == False).update({'is_read': True})
-    db.session.commit()
+    mark_notifications_read_for_current_user()
     return redirect(url_for('dashboard'))
 
 @app.route('/admin/dashboard')
@@ -596,7 +715,7 @@ def login():
             wait_minutes = int((locked_until - datetime.utcnow()).total_seconds() // 60) + 1
             flash(f'Too many failed attempts. Please wait {wait_minutes} minute(s) before trying again.', 'danger')
         else:
-            if user and bcrypt.check_password_hash(user.password_hash, password):
+            if user and verify_password(user.password_hash, password):
                 login_user(user, remember=remember)
                 login_attempts.pop(username, None)
                 lockout_until.pop(username, None)
@@ -636,8 +755,11 @@ def forgot_password():
             db.session.commit()
             
             session['reset_phone'] = phone_number
-            print(f"\n{'='*50}\nSMS SENT TO {phone_number}: OTP is {otp}\n{'='*50}\n")
-            flash(f'An SMS containing your OTP has been sent to {phone_number}.', 'success')
+            sent = send_sms(phone_number, f"Your OTP is {otp}")
+            if sent:
+                flash(f'An SMS containing your OTP has been sent to {phone_number}.', 'success')
+            else:
+                flash(f'OTP generated and logged (Twilio not configured or send failed).', 'warning')
             return redirect(url_for('reset_password_otp'))
         else:
             flash('Phone number not found.', 'danger')
@@ -732,8 +854,10 @@ def generate_ai_response(user_message, books, categories):
         Provide a concise, friendly, and helpful response.
         """
         
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model='gemini-1.5-flash',
+            contents=prompt
+        )
         return response.text
         
     except Exception as e:
@@ -1234,8 +1358,10 @@ Return only a JSON array of objects in this exact format:
 Notes:
 {text[:60000000000]}
 """
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model='gemini-1.5-flash',
+            contents=prompt
+        )
         response_text = response.text
         if "```json" in response_text:
             response_text = response_text.split("```json")[1].split("```")[0]
@@ -2334,13 +2460,6 @@ def check_muted(func):
 @login_required
 @check_muted
 def start_evaluation(eval_id):
-    # Mark all unread notifications as read when student starts evaluation
-    Notification.query.filter(
-        or_(Notification.user_id == current_user.id, Notification.user_id == None),
-        Notification.is_read == False
-    ).update({Notification.is_read: True}, synchronize_session=False)
-    db.session.commit()
-    
     evaluation = Evaluation.query.get_or_404(eval_id)
     
     if not evaluation.is_active:
@@ -2429,6 +2548,7 @@ def take_evaluation(eval_id, attempt_id):
             evaluation.is_locked = True
         
         db.session.commit()
+        mark_notifications_read_for_current_user()
         
         log_action("Evaluation Submitted", f"Submitted evaluation: {evaluation.title} (Score: {total_marks}/{evaluation.total_marks})")
         
@@ -2498,6 +2618,7 @@ def submit_evaluation(eval_id, attempt_id):
         evaluation.is_locked = True
     
     db.session.commit()
+    mark_notifications_read_for_current_user()
     
     log_action("Evaluation Submitted", f"Submitted evaluation: {evaluation.title} (Score: {total_marks}/{evaluation.total_marks})")
     
@@ -2518,6 +2639,7 @@ def evaluation_result(eval_id, attempt_id):
         flash('You have not submitted this evaluation yet!', 'warning')
         return redirect(url_for('take_evaluation', eval_id=eval_id, attempt_id=attempt_id))
     
+    mark_notifications_read_for_current_user()
     responses = StudentResponse.query.filter_by(attempt_id=attempt_id).all()
     questions = Question.query.filter_by(evaluation_id=eval_id).order_by(Question.order).all()
     
@@ -2914,13 +3036,6 @@ def view_assignment(assignment_id):
 @login_required
 @check_muted
 def submit_assignment(assignment_id):
-    # Mark all unread notifications as read when student accesses assignment submission
-    Notification.query.filter(
-        or_(Notification.user_id == current_user.id, Notification.user_id == None),
-        Notification.is_read == False
-    ).update({Notification.is_read: True}, synchronize_session=False)
-    db.session.commit()
-    
     assignment = Assignment.query.get_or_404(assignment_id)
     
     if not assignment.is_active:
@@ -2982,6 +3097,7 @@ def submit_assignment(assignment_id):
         )
         db.session.add(submission)
         db.session.commit()
+        mark_notifications_read_for_current_user()
         
         log_action("Assignment Submitted", f"Submitted assignment: {assignment.title}")
         
@@ -3096,4 +3212,4 @@ if __name__ == '__main__':
     import os
     ensure_db_schema()
     debug_mode = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
-    app.run(host='127.0.0.1', port=5000, debug=debug_mode)
+    app.run(host='127.0.0.1', port=5000, debug=False)

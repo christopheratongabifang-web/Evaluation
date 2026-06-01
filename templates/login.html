@@ -403,10 +403,9 @@
 
     <div class="login-container">
         <div class="brand-header">
-            <div class="brand-icon">
-                <i class="fa-solid fa-book-open-reader"></i>
-            </div>
-            <h1>RUBRIC</h1>
+            <a href="{{ url_for('home') }}">
+                <img src="{{ url_for('static', filename='img/logo.svg') }}" alt="RUBRIC" style="height: 56px;">
+            </a>
         </div>
 
         <!-- Flash messages -->
