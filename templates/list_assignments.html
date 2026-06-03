@@ -59,7 +59,12 @@
                                 </a>
                             {% endif %}
                             <div style="font-size: 0.85rem; color: var(--text-secondary);">
-                                <i class="fas fa-clock me-1"></i> Due: {{ assignment.end_date.strftime('%b %d, %H:%M') }}
+                                <i class="fas fa-clock me-1"></i>
+                                {% if assignment.end_date %}
+                                    Due: {{ assignment.end_date.strftime('%b %d, %H:%M') }}
+                                {% else %}
+                                    No due date set
+                                {% endif %}
                             </div>
                         </div>
 

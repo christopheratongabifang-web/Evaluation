@@ -315,12 +315,32 @@ def dashboard():
 
     active_evaluations_count = 0
     active_assignments_count = 0
+
+    taken_evaluation_ids = db.session.query(EvaluationAttempt.evaluation_id).filter_by(user_id=current_user.id).subquery()
+    submitted_assignment_ids = db.session.query(AssignmentSubmission.assignment_id).filter_by(user_id=current_user.id).subquery()
+
     if student_class:
-        active_evaluations_count = Evaluation.query.filter(Evaluation.is_active == True, or_(Evaluation.target_class == 'All', Evaluation.target_class == student_class)).count()
-        active_assignments_count = Assignment.query.filter(Assignment.is_active == True, or_(Assignment.target_class == 'All', Assignment.target_class == student_class)).count()
+        active_evaluations_count = Evaluation.query.filter(
+            Evaluation.is_active == True,
+            or_(Evaluation.target_class == 'All', Evaluation.target_class == student_class),
+            ~Evaluation.id.in_(taken_evaluation_ids)
+        ).count()
+        active_assignments_count = Assignment.query.filter(
+            Assignment.is_active == True,
+            or_(Assignment.target_class == 'All', Assignment.target_class == student_class),
+            ~Assignment.id.in_(submitted_assignment_ids)
+        ).count()
     elif not current_user.is_admin:
-        active_evaluations_count = Evaluation.query.filter(Evaluation.is_active == True, Evaluation.target_class == 'All').count()
-        active_assignments_count = Assignment.query.filter(Assignment.is_active == True, Assignment.target_class == 'All').count()
+        active_evaluations_count = Evaluation.query.filter(
+            Evaluation.is_active == True,
+            Evaluation.target_class == 'All',
+            ~Evaluation.id.in_(taken_evaluation_ids)
+        ).count()
+        active_assignments_count = Assignment.query.filter(
+            Assignment.is_active == True,
+            Assignment.target_class == 'All',
+            ~Assignment.id.in_(submitted_assignment_ids)
+        ).count()
 
     # Reading progress stats
     reading_stats = {
@@ -2361,17 +2381,20 @@ def check_muted(func):
         return func(*args, **kwargs)
     return decorated_function
 
-# Student: Take Evaluation
-@app.route('/evaluation/<int:eval_id>/start', methods=['GET', 'POST'])
-@login_required
-@check_muted
-def start_evaluation(eval_id):
-    # Mark all unread notifications as read when student starts evaluation
+# Helper to clear unread notifications for the current user
+def clear_unread_notifications():
     Notification.query.filter(
         or_(Notification.user_id == current_user.id, Notification.user_id == None),
         Notification.is_read == False
     ).update({Notification.is_read: True}, synchronize_session=False)
     db.session.commit()
+
+# Student: Take Evaluation
+@app.route('/evaluation/<int:eval_id>/start', methods=['GET', 'POST'])
+@login_required
+@check_muted
+def start_evaluation(eval_id):
+    clear_unread_notifications()
     
     evaluation = Evaluation.query.get_or_404(eval_id)
     
@@ -2419,6 +2442,8 @@ def take_evaluation(eval_id, attempt_id):
     if attempt.user_id != current_user.id or attempt.evaluation_id != eval_id:
         return redirect(url_for('dashboard'))
     
+    clear_unread_notifications()
+
     if attempt.is_submitted:
         flash('You have already submitted this evaluation!', 'warning')
         return redirect(url_for('evaluation_result', eval_id=eval_id, attempt_id=attempt_id))
@@ -2483,6 +2508,7 @@ def take_evaluation(eval_id, attempt_id):
 @app.route('/evaluation/<int:eval_id>/submit/<int:attempt_id>', methods=['POST'])
 @login_required
 def submit_evaluation(eval_id, attempt_id):
+    clear_unread_notifications()
     evaluation = Evaluation.query.get_or_404(eval_id)
     attempt = EvaluationAttempt.query.get_or_404(attempt_id)
     
@@ -2540,6 +2566,7 @@ def submit_evaluation(eval_id, attempt_id):
 @app.route('/evaluation/<int:eval_id>/result/<int:attempt_id>', methods=['GET'])
 @login_required
 def evaluation_result(eval_id, attempt_id):
+    clear_unread_notifications()
     evaluation = Evaluation.query.get_or_404(eval_id)
     attempt = EvaluationAttempt.query.get_or_404(attempt_id)
     

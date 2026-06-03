@@ -422,6 +422,7 @@
             <p class="subtitle">Sign in to your account to continue</p>
 
             <form method="POST" action="{{ url_for('login') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <div class="form-group">
                     <label for="username">Email Address</label>
                     <div class="input-wrapper">
