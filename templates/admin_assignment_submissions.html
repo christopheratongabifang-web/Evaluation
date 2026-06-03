@@ -81,7 +81,13 @@
                             </td>
                             <td style="padding: 1.25rem; text-align: right;">
                                 <button class="btn btn-sm btn-primary" style="border-radius: 0.75rem; padding: 0.5rem 1rem;" 
-                                        onclick="viewSubmission('{{ submission.student_profile.full_name }}', `{{ submission.content|replace('`', '\\`') }}`, '{{ submission.file_path }}', '{{ submission.id }}', '{{ submission.grade or '' }}', `{{ submission.feedback|replace('`', '\\`') or '' }}`)">
+                                        data-student-name="{{ submission.student_profile.full_name }}"
+                                        data-content="{{ submission.content }}"
+                                        data-file-path="{{ submission.file_path }}"
+                                        data-submission-id="{{ submission.id }}"
+                                        data-grade="{{ submission.grade or '' }}"
+                                        data-feedback="{{ submission.feedback or '' }}"
+                                        onclick="viewSubmission(this)">
                                     <i class="fas fa-eye me-1"></i> Review & Grade
                                 </button>
                             </td>
@@ -178,18 +184,40 @@
 </div>
 
 <script>
-function viewSubmission(studentName, content, filePath, submissionId, grade, feedback) {
-    document.querySelector('#submissionModal .modal-title').innerHTML = 'Review Submission: <span style="color: var(--primary);">' + studentName + '</span>';
+function viewSubmission(button) {
+    const studentName = button.dataset.studentName || '';
+    const content = button.dataset.content || '';
+    const filePath = button.dataset.filePath || '';
+    const submissionId = button.dataset.submissionId || '';
+    const grade = button.dataset.grade || '';
+    const feedback = button.dataset.feedback || '';
+
+    const modalTitleEl = document.querySelector('#submissionModal .modal-title');
+    modalTitleEl.textContent = '';
+    modalTitleEl.appendChild(document.createTextNode('Review Submission: '));
+    const nameSpan = document.createElement('span');
+    nameSpan.style.color = 'var(--primary)';
+    nameSpan.textContent = studentName;
+    modalTitleEl.appendChild(nameSpan);
+
     document.getElementById('submissionContent').textContent = content;
     
     // Set form action
-    document.getElementById('gradingForm').action = '/admin/assignments/grade/' + submissionId;
+    document.getElementById('gradingForm').action = '/admin/assignments/grade/' + encodeURIComponent(submissionId);
     document.getElementById('grade').value = grade;
     document.getElementById('feedback').value = feedback;
 
     const pdfContainer = document.getElementById('pdfLinkContainer');
+    pdfContainer.innerHTML = '';
     if (filePath && filePath !== 'None') {
-        pdfContainer.innerHTML = '<a href="/uploads/' + filePath + '" target="_blank" class="btn btn-danger w-100" style="border-radius: 1rem; padding: 0.75rem;"><i class="fas fa-file-pdf me-2"></i> View Attached PDF Evidence</a>';
+        const link = document.createElement('a');
+        link.href = '/uploads/' + encodeURIComponent(filePath);
+        link.target = '_blank';
+        link.className = 'btn btn-danger w-100';
+        link.style.borderRadius = '1rem';
+        link.style.padding = '0.75rem';
+        link.innerHTML = '<i class="fas fa-file-pdf me-2"></i> View Attached PDF Evidence';
+        pdfContainer.appendChild(link);
         pdfContainer.style.display = 'block';
     } else {
         pdfContainer.style.display = 'none';

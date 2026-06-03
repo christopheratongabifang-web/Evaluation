@@ -24,7 +24,9 @@
         <h2 style="margin-top: 0;">Students</h2>
         <div style="display: flex; flex-direction: column; gap: 0.5rem;">
             {% for student in students %}
-            <a href="#student-{{ student.id }}" onclick="selectStudent({{ student.id }}, '{{ student.username }}')" 
+            <a href="#student-{{ student.id }}" onclick="selectStudent(this)" 
+               data-student-id="{{ student.id }}"
+               data-student-name="{{ student.username }}"
                class="btn btn-outline" style="text-align: left; justify-content: flex-start;">
                 <i class="fa-solid fa-user"></i> {{ student.username }}
             </a>
@@ -64,12 +66,14 @@
 <script>
 let currentStudentId = null;
 
-function selectStudent(studentId, studentName) {
+function selectStudent(button) {
+    const studentId = button.dataset.studentId;
+    const studentName = button.dataset.studentName || '';
     currentStudentId = studentId;
     document.getElementById('student-name').textContent = studentName;
     document.getElementById('clear-form').action = '/clear_conversation/' + studentId;
     document.getElementById('conversation-panel').style.display = 'flex';
-    loadMessages(studentId);
+    loadMessages(studentId, studentName);
 }
 
 function closeConversation() {
@@ -77,16 +81,69 @@ function closeConversation() {
     currentStudentId = null;
 }
 
-function loadMessages(studentId) {
+function loadMessages(studentId, studentName) {
     const container = document.getElementById('messages-container');
     container.innerHTML = '';
-    
-    const convElement = document.querySelector(`[data-student-id="${studentId}"]`);
-    if (convElement) {
-        const messagesHtml = convElement.getAttribute('data-messages');
-        container.innerHTML = messagesHtml || '<p style="color: var(--text-secondary);">No messages yet.</p>';
-        container.scrollTop = container.scrollHeight;
+    const conversation = (window.studentConversations || {})[studentId] || [];
+    if (!conversation.length) {
+        container.innerHTML = '<p style="color: var(--text-secondary);">No messages yet.</p>';
+        return;
     }
+
+    conversation.forEach(msg => {
+        const messageDiv = document.createElement('div');
+        messageDiv.style.marginBottom = '0.75rem';
+        messageDiv.style.padding = '0.75rem';
+        messageDiv.style.borderRadius = '0.5rem';
+        messageDiv.style.background = msg.is_me ? 'var(--primary)' : 'var(--surface-border)';
+        messageDiv.style.color = 'var(--text)';
+        messageDiv.style.position = 'relative';
+
+        const deleteForm = document.createElement('form');
+        deleteForm.style.position = 'absolute';
+        deleteForm.style.top = '0.5rem';
+        deleteForm.style.right = '0.5rem';
+        deleteForm.style.margin = '0';
+        deleteForm.onsubmit = event => deleteMessage(event, msg.id);
+
+        const deleteButton = document.createElement('button');
+        deleteButton.type = 'submit';
+        deleteButton.className = 'btn btn-sm';
+        deleteButton.style.padding = '0.15rem 0.4rem';
+        deleteButton.style.background = 'rgba(0,0,0,0.3)';
+        deleteButton.style.color = 'white';
+        deleteButton.style.border = 'none';
+        deleteButton.style.borderRadius = '0.25rem';
+        deleteButton.title = 'Delete Message';
+        deleteButton.innerHTML = '<i class="fa-solid fa-xmark"></i>';
+        deleteForm.appendChild(deleteButton);
+
+        const senderStrong = document.createElement('strong');
+        senderStrong.style.display = 'block';
+        senderStrong.style.fontSize = '0.85rem';
+        senderStrong.style.marginBottom = '0.25rem';
+        senderStrong.style.paddingRight = '2rem';
+        senderStrong.textContent = msg.is_me ? 'You' : studentName;
+
+        const contentDiv = document.createElement('div');
+        contentDiv.textContent = msg.content;
+
+        const timestamp = document.createElement('span');
+        timestamp.style.display = 'block';
+        timestamp.style.fontSize = '0.75rem';
+        timestamp.style.color = 'var(--text-secondary)';
+        timestamp.style.marginTop = '0.25rem';
+        timestamp.textContent = msg.created_at;
+
+        messageDiv.appendChild(deleteForm);
+        messageDiv.appendChild(senderStrong);
+        messageDiv.appendChild(contentDiv);
+        messageDiv.appendChild(timestamp);
+
+        container.appendChild(messageDiv);
+    });
+
+    container.scrollTop = container.scrollHeight;
 }
 
 function sendMessage(event) {
@@ -123,39 +180,23 @@ window.addEventListener('load', function() {
         const studentId = window.location.hash.replace('#student-', '');
         const studentLink = document.querySelector(`a[href="#student-${studentId}"]`);
         if (studentLink) {
-            // We just call the click handler manually to open the panel
             studentLink.click();
         }
     }
 });
 
-// Store conversation data as data attributes
+window.studentConversations = window.studentConversations || {};
 {% for student_id, (student, msgs) in conversations.items() %}
-document.addEventListener('DOMContentLoaded', function() {
-    const convDiv = document.createElement('div');
-    convDiv.setAttribute('data-student-id', {{ student_id }});
-    
-    let messagesHtml = '';
-    {% for msg in msgs %}
-    messagesHtml += `
-        <div style="margin-bottom: 0.75rem; padding: 0.75rem; border-radius: 0.5rem; background: {% if msg.sender_id == current_user.id %}var(--primary){% else %}var(--surface-border){% endif %}; color: var(--text); position: relative;">
-            <form style="position: absolute; top: 0.5rem; right: 0.5rem; margin: 0;" onsubmit="deleteMessage(event, {{ msg.id }})">
-                <button type="submit" class="btn btn-sm" style="padding: 0.15rem 0.4rem; background: rgba(0,0,0,0.3); color: white; border: none; border-radius: 0.25rem;" title="Delete Message"><i class="fa-solid fa-xmark"></i></button>
-            </form>
-            <strong style="display: block; font-size: 0.85rem; margin-bottom: 0.25rem; padding-right: 2rem;">
-                {% if msg.sender_id == current_user.id %}You{% else %}{{ student.username }}{% endif %}
-            </strong>
-            {{ msg.content }}
-            <span style="display: block; font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem;">
-                {{ msg.created_at.strftime('%b %d, %I:%M %p') }}
-            </span>
-        </div>
-    `;
+window.studentConversations[{{ student_id }}] = [
+    {% for msg in msgs %}{
+        sender_id: {{ msg.sender_id }},
+        id: {{ msg.id }},
+        content: {{ msg.content|tojson }},
+        created_at: {{ msg.created_at.strftime('%b %d, %I:%M %p')|tojson }},
+        is_me: {{ 'true' if msg.sender_id == current_user.id else 'false' }}
+    }{% if not loop.last %},{% endif %}
     {% endfor %}
-    
-    convDiv.setAttribute('data-messages', messagesHtml);
-    document.body.appendChild(convDiv);
-});
+];
 {% endfor %}
 </script>
 

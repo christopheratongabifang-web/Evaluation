@@ -7,9 +7,11 @@ from difflib import SequenceMatcher
 from pypdf import PdfReader
 import google.generativeai as genai
 from datetime import datetime, timedelta
+from urllib.parse import urljoin, urlparse
 from flask import Flask, render_template, request, redirect, url_for, flash, send_file, send_from_directory, session, jsonify, abort
 from flask_login import LoginManager, login_user, login_required, logout_user, current_user
 from flask_bcrypt import Bcrypt
+from flask_wtf.csrf import CSRFProtect, generate_csrf
 from werkzeug.utils import secure_filename
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadTimeSignature
 from sqlalchemy import text, or_, and_
@@ -75,6 +77,13 @@ def update_env_file(path, updates):
         f.writelines(lines)
 
 
+def is_safe_url(target):
+    host_url = request.host_url
+    ref_url = urlparse(host_url)
+    test_url = urlparse(urljoin(host_url, target or ''))
+    return test_url.scheme in ('http', 'https') and ref_url.netloc == test_url.netloc
+
+
 # Load local environment variables from .env if present
 load_dotenv_file(os.path.join(os.path.dirname(__file__), '.env'))
 
@@ -114,8 +123,14 @@ os.makedirs(os.path.join(BASE_DIR, 'instance'), exist_ok=True)
 
 db.init_app(app)
 bcrypt = Bcrypt(app)
+csrf = CSRFProtect()
+csrf.init_app(app)
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
+
+@app.context_processor
+def inject_csrf_token():
+    return {'csrf_token': generate_csrf}
 
 PASSWORD_RULES = {
     'uppercase': re.compile(r'[A-Z]'),
@@ -1133,12 +1148,16 @@ def calculate_similarity(text1, text2):
 def student_profile():
     profile = StudentProfile.query.filter_by(user_id=current_user.id).first()
     next_url = request.values.get('next')
+    if next_url and not is_safe_url(next_url):
+        next_url = None
     
     if request.method == 'POST':
         student_id = request.form.get('student_id')
         full_name = request.form.get('full_name')
         student_class = request.form.get('student_class')
         next_url = request.form.get('next')
+        if next_url and not is_safe_url(next_url):
+            next_url = None
         
         student_id = student_id.strip() if student_id else ''
         full_name = full_name.strip() if full_name else ''

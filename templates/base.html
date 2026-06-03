@@ -293,6 +293,43 @@
         }
     </script>
     <script type="text/javascript" src="//translate.google.com/translate_a/element.js?cb=googleTranslateElementInit"></script>
+    <script>
+        const csrfToken = '{{ csrf_token() }}';
+        document.addEventListener('DOMContentLoaded', function() {
+            document.querySelectorAll('form[method="POST"], form[method="post"]').forEach(form => {
+                if (!form.querySelector('input[name="csrf_token"]')) {
+                    const input = document.createElement('input');
+                    input.type = 'hidden';
+                    input.name = 'csrf_token';
+                    input.value = csrfToken;
+                    form.appendChild(input);
+                }
+            });
+
+            if (window.fetch) {
+                const originalFetch = window.fetch.bind(window);
+                window.fetch = function(resource, init = {}) {
+                    init = init || {};
+                    const method = (init.method || 'GET').toUpperCase();
+                    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+                        const headers = init.headers instanceof Headers ? init.headers : Object.assign({}, init.headers);
+                        const hasToken = headers['X-CSRFToken'] || headers['X-CSRF-Token'] || headers['x-csrftoken'] || headers['x-csrf-token'];
+                        if (!hasToken) {
+                            if (headers instanceof Headers) {
+                                headers.append('X-CSRFToken', csrfToken);
+                                headers.append('X-CSRF-Token', csrfToken);
+                            } else {
+                                headers['X-CSRFToken'] = csrfToken;
+                                headers['X-CSRF-Token'] = csrfToken;
+                            }
+                        }
+                        init.headers = headers;
+                    }
+                    return originalFetch(resource, init);
+                };
+            }
+        });
+    </script>
     {% block scripts %}{% endblock %}
 </body>
 </html>
