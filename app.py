@@ -79,11 +79,21 @@ def update_env_file(path, updates):
 load_dotenv_file(os.path.join(os.path.dirname(__file__), '.env'))
 
 app = Flask(__name__)
+
+# ----- CHANGE 1: Add BASE_DIR for portable paths -----
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your_super_secret_key_change_in_production')
-#app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///library.db'
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'postgresql://library_user:Abifang@localhost:5432/library_db')
+
+# ----- CHANGE 2: Use SQLite database inside instance folder (fallback to environment variable) -----
+default_db_path = 'sqlite:///' + os.path.join(BASE_DIR, 'instance', 'site.db')
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', default_db_path)
+
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['UPLOAD_FOLDER'] = os.path.join(app.root_path, 'uploads')
+
+# ----- CHANGE 3: Use BASE_DIR for upload folder -----
+app.config['UPLOAD_FOLDER'] = os.path.join(BASE_DIR, 'uploads')
+
 app.config['GEMINI_API_KEY'] = os.environ.get('GEMINI_API_KEY')
 app.config['PREFERRED_URL_SCHEME'] = 'http'
 
@@ -98,7 +108,9 @@ if is_gemini_api_configured():
 # For password reset tokens
 s = URLSafeTimedSerializer(app.config['SECRET_KEY'])
 
+# ----- CHANGE 4: Ensure uploads and instance folders exist -----
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs(os.path.join(BASE_DIR, 'instance'), exist_ok=True)
 
 db.init_app(app)
 bcrypt = Bcrypt(app)
@@ -714,7 +726,8 @@ def generate_ai_response(user_message, books, categories):
             return "You don't have any books yet. Start by adding some books to your collection!"
         return "Here are the books in your library:\n" + "\n".join([f"- {book.title} by {book.author}" for book in books])
 
-    if not is_gemini_api_configured() or client is None:
+    # ----- CHANGE 5: Remove reference to undefined `client` -----
+    if not is_gemini_api_configured():
         return "The AI assistant is not configured yet. Please ask your administrator to set GEMINI_API_KEY in the environment."
 
     try:
@@ -3096,4 +3109,4 @@ if __name__ == '__main__':
     import os
     ensure_db_schema()
     debug_mode = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
-    app.run(host='127.0.0.1', port=5000, debug=debug_mode)
+    app.run(host='0.0.0.0', port=5000, debug=debug_mode)
